@@ -1,0 +1,36 @@
+[13:56:24] Telnet server started and listening on port 23
+[13:56:24] DICOM MWL SCP listening on port 104
+[13:56:29] DICOM client connected (socket 784)
+[13:56:29] MWL C-FIND -> Modality: [OT] | Date: [20260626]
+[13:56:29] DICOM client disconnected (socket 784)
+[13:56:35] DICOM client connected (socket 812)
+[13:56:35] MWL C-FIND -> Modality: [OT] | Date: [20260626]
+[13:56:35] DICOM client disconnected (socket 812)
+[13:57:01] Telnet server stopped
+[13:57:01] DICOM MWL SCP stopped
+[13:57:02] Telnet server started and listening on port 23
+[13:57:02] DICOM MWL SCP listening on port 104
+[13:57:42] DICOM client connected (socket 252)
+[13:57:42] MWL C-FIND -> Modality: [*] | Date: [*]
+[13:57:43] DICOM client disconnected (socket 252)
+[14:39:05] DICOM client connected (socket 1152)
+[14:39:05] MWL C-FIND -> Modality: [OT] | Date: [20260626]
+[14:39:05] DICOM client disconnected (socket 1152)
+[14:42:46] Telnet server stopped
+[14:42:46] DICOM MWL SCP stopped
+[14:50:14] Telnet server started and listening on port 23
+[14:50:14] DICOM MWL SCP listening on port 104
+[14:50:28] DICOM client connected (socket 768)
+[14:50:28] MWL C-FIND -> Modality: [OT] | Date: [20260626]
+[14:50:28] DICOM client disconnected (socket 768)
+[14:51:06] Telnet Client connected on socket 776
+[14:51:08] PENDING PatientID 10001
+[14:51:10] INSERTED PatientID 10001
+[14:51:21] Client on socket 776 timed out
+[14:52:07] Telnet Client connected on socket 780
+[14:52:08] PENDING PatientID 10001
+[14:52:10] UPDATED PatientID 10001
+[14:52:19] DICOM client connected (socket 772)
+[14:52:19] MWL C-FIND -> Modality: [OT] | Date: [20260626]
+[14:52:19] DICOM client disconnected (socket 772)
+[14:52:21] Client on socket 780 timed out

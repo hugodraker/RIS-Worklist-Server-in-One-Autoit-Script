@@ -1,4 +1,4 @@
-PatientID,PatientName,Accession,BirthDate,Sex,SPSID,SPSDescription,RequestedProcedureID,StationAET,Modality,ScheduledDate,ScheduledTime,RequestedProcDesc,StudyInstanceUID,ReferringPhysicianName,Status,ProcedureCode,ProcedureCodeDesc
+PatientID,PatientName,Accession,BirthDate,Sex,SPSID,SPSDescription,RequestedProcedureID,StationAET,Modality,ScheduledDate,ScheduledTime,RequestedProcDesc,StudyInstanceUID,ReferringPhysicianName,Status,ProcedureCode,ProcedureCodeDesc,CodingScheme,PerformingPhysician,StationName,Location
 P10001,John Doe,ACC001,19800101,M,SPS001,Chest X-Ray,RP001,AET1,CR,20260606,09:00,Chest X-Ray,1.2.3.4.5.1,Dr. Smith,1,PCODE01,XR Chest 1 View
 P10002,Jane Smith,ACC002,19920515,F,SPS002,CT Head w/o Contrast,RP002,AET1,CT,20260606,10:30,CT Head w/o Contrast,1.2.3.4.5.2,Dr. Brown,2,PCODE02,CT Head
 P10003,Alex Johnson,ACC003,19751120,M,SPS003,MRI Knee Right,RP003,AET2,MR,20260607,11:00,MRI Knee Right,1.2.3.4.5.3,Dr. Davis,1,PCODE03,MR Knee RT
@@ -9,4 +9,5 @@ P10007,Chris Redfield,ACC007,19730514,M,SPS007,OT General Protocol,RP007,AET3,OT
 P10008,Jill Valentine,ACC008,19750214,F,SPS008,MR Brain w/ Contrast,RP008,AET2,MR,20260610,09:30,MR Brain w/ Contrast,1.2.3.4.5.8,Dr. Anderson,2,PCODE08,MR Brain w
 P10009,Leon Kennedy,ACC009,19770809,M,SPS009,CR Wrist Left,RP009,AET1,CR,20260611,15:45,CR Wrist Left,1.2.3.4.5.9,Dr. Thomas,3,PCODE09,CR Wrist LT
 P10010,Claire Redfield,ACC010,19790615,F,SPS010,US Pelvis Transvaginal,RP010,AET2,US,20260612,11:30,US Pelvis Transvaginal,1.2.3.4.5.10,Dr. Jackson,1,PCODE10,US Pelvis TV
-0010,Claire Redfield,ACC010,19790615,F,SPS010,US Pelvis Transvaginal,RP010,AET2,US,20260612,11:30,US Pelvis Transvaginal,1.2.3.4.5.10,Dr. Jackson,1,PCODE10,US Pelvis TV
+0010,Claire Redfield,ACC010,19790615,F,SPS010,US Pelvis Transvaginal,RP010,AET2,OT,20260626,11:30,US Pelvis Transvaginal,1.2.3.4.5.10,Dr. Jackson,1,PCODE10,US Pelvis TV
+10001,John Doe,ACC001,19800101,M,SPS001,Chest X-Ray,RP001,AET1,OT,20260626,09:00,BMD BASELINE,1.2.3.4.5.1,Dr. Smith,1,PCODE01,BMD BASELINE,99LOCAL,Dr. House,ROOM1,ER

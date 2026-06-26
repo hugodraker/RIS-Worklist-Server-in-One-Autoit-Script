@@ -1,14 +1,6 @@
-; ===================================================================
-; FULL MERGED RIS MWL SCP + TELNET CSV SERVER + GUI (STABILIZED)
-; Fixed: COM Object Removal, Socket Error Handling, GUI Initialization
-; ===================================================================
-;run telnet 127.0.0.1 23
-;DISP OT YYYYDDMM YYYYDDMM ; show range of patients for modality OT
-;DISP OT YYYYDDMM ;SHOW TODAYS PATIENTS
-;DISP ; show whole worklist
-;to add a patient to the worklist in telnet try: 
-;10002,Jane Smith,ACC002,19920515,F,SPS002,CT Head w/o Contrast,RP002,AET1,CT,20260606,10:30,CT Head w/o Contrast,1.2.3.4.5.2,Dr. Brown,2,PCODE02,CT Head
-
+;RIS WORKLIST AND TELNET SERVER ENTIRELY IN AutoIt 
+;2026 j
+;now with Procedure Codes ;-)
 
 ;#RequireAdmin
 
@@ -18,9 +10,16 @@
 #include <EditConstants.au3>
 #include <File.au3>
 #include <Date.au3>
+#include <TrayConstants.au3>
 
 Opt("TrayAutoPause", 0)
-Opt("TrayMenuMode", 3)
+Opt("TrayMenuMode", 3) ; Manual checkbox management
+
+; ===================================================================
+; SAMPLE CSV ENTRY (22 Columns)
+; ===================================================================
+; PatientID,PatientName,Accession,BirthDate,Sex,SPSID,SPSDescription,RequestedProcedureID,StationAET,Modality,ScheduledDate,ScheduledTime,RequestedProcDesc,StudyInstanceUID,ReferringPhysicianName,Status,ProcedureCode,ProcedureCodeDesc,CodingScheme,PerformingPhysician,StationName,Location
+; 10001,John Doe,ACC001,19800101,M,SPS001,Chest X-Ray,RP001,AET1,DX,20260626,09:00,Chest X-Ray,1.2.3.4.5.1,Dr. Smith,1,PCODE01,Chest X-Ray Routine,99LOCAL,Dr. House,ROOM1,ER
 
 ; ===================================================================
 ; DYNAMIC INI & CONFIGURATION
@@ -28,16 +27,17 @@ Opt("TrayMenuMode", 3)
 Global $INI_FILE = @ScriptDir & "\" & StringRegExpReplace(@ScriptName, "\.[^.]*$", "") & ".ini"
 Global Const $CSV_FILE = @ScriptDir & "\patients.csv"
 
-; 18-Column CSV Header
-Global Const $CSV_HEADER = "PatientID,PatientName,Accession,BirthDate,Sex,SPSID,SPSDescription,RequestedProcedureID,StationAET,Modality,ScheduledDate,ScheduledTime,RequestedProcDesc,StudyInstanceUID,ReferringPhysicianName,Status,ProcedureCode,ProcedureCodeDesc"
+; 22-Column CSV Header
+Global Const $CSV_HEADER = "PatientID,PatientName,Accession,BirthDate,Sex,SPSID,SPSDescription,RequestedProcedureID,StationAET,Modality,ScheduledDate,ScheduledTime,RequestedProcDesc,StudyInstanceUID,ReferringPhysicianName,Status,ProcedureCode,ProcedureCodeDesc,CodingScheme,PerformingPhysician,StationName,Location"
 
 Global Const $APPEND_DELAY_MS = 2000
 
 Global $SERVER_AET = "AUTOIT_SCP"
 Global $DICOM_PORT = 104
 Global $TELNET_PORT = 23
-Global $TELNET_TIMEOUT = 10 ; Default 10 seconds
-Global $TRAY_CHECKED=0
+Global $TELNET_TIMEOUT = 10 
+Global $DEBUG_LOG = 1 
+
 ; ===================================================================
 ; GLOBALS
 ; ===================================================================
@@ -71,24 +71,27 @@ If Not FileExists($INI_FILE) Then
     IniWrite($INI_FILE, "Server", "DicomPort", "104")
     IniWrite($INI_FILE, "Server", "TelnetPort", "23")
     IniWrite($INI_FILE, "Server", "TelnetTimeout", "10")
+    IniWrite($INI_FILE, "Server", "DebugLog", "1")
     
     IniWrite($INI_FILE, "Lists", "Modalities", "CR;DX;CT;MR;US;OT")
-    IniWrite($INI_FILE, "Lists", "AETitles", "")
-    IniWrite($INI_FILE, "Lists", "ReferringPhysicians", "")
-    IniWrite($INI_FILE, "Lists", "Procedures", "")
+    IniWrite($INI_FILE, "Lists", "AETitles", "AET1;AET2")
+    IniWrite($INI_FILE, "Lists", "ReferringPhysicians", "Dr. Smith;Dr. Brown")
+    IniWrite($INI_FILE, "Lists", "Procedures", "Chest X-Ray;CT Head")
+    IniWrite($INI_FILE, "Lists", "ProcedureCodes", "PCODE01;PCODE02")
 EndIf
 
 $SERVER_AET = IniRead($INI_FILE, "Server", "AETitle", "AUTOIT_SCP")
 $DICOM_PORT = Number(IniRead($INI_FILE, "Server", "DicomPort", "104"))
 $TELNET_PORT = Number(IniRead($INI_FILE, "Server", "TelnetPort", "23"))
 $TELNET_TIMEOUT = Number(IniRead($INI_FILE, "Server", "TelnetTimeout", "10"))
+$DEBUG_LOG = Number(IniRead($INI_FILE, "Server", "DebugLog", "1"))
 
 ; ===================================================================
 ; GUI + TRAY CREATION
 ; ===================================================================
 Func CSVTS_TrayCreate()
     $g_idToggle   = TrayCreateItem("Server Running")
-    TrayItemSetState($g_idToggle, $TRAY_CHECKED)
+    TrayItemSetState($g_idToggle, $TRAY_UNCHECKED) ; Set initially unchecked until started
     $g_idSettings = TrayCreateItem("Settings")
     TrayCreateItem("")
     $g_idExit     = TrayCreateItem("Exit")
@@ -114,28 +117,82 @@ Func CSVTS_HideMainGUI()
 EndFunc
 
 Func CSVTS_ShowSettings()
-    Local $h = GUICreate("Settings", 420, 300)
+    Local $h = GUICreate("Settings", 440, 370)
     
-    GUICtrlCreateLabel("INI file: " & StringRegExpReplace($INI_FILE, "^.*\\", ""), 10, 10, 400, 20)
-    GUICtrlCreateLabel("Server AET: " & $SERVER_AET, 10, 40, 200)
-    GUICtrlCreateLabel("DICOM Port: " & $DICOM_PORT, 180, 40, 100)
-    GUICtrlCreateLabel("Telnet Port: " & $TELNET_PORT, 300, 40, 100)
+    GUICtrlCreateLabel("Server AET:", 10, 10, 100, 20)
+    Local $inAET = GUICtrlCreateInput($SERVER_AET, 120, 10, 120, 20)
+    
+    GUICtrlCreateLabel("DICOM Port:", 260, 10, 80, 20)
+    Local $inDcmPort = GUICtrlCreateInput($DICOM_PORT, 340, 10, 80, 20)
+    
+    GUICtrlCreateLabel("Telnet Port:", 10, 40, 100, 20)
+    Local $inTelPort = GUICtrlCreateInput($TELNET_PORT, 120, 40, 120, 20)
+
+    GUICtrlCreateLabel("Debug Logging:", 260, 40, 80, 20)
+    Local $chkDebug = GUICtrlCreateCheckbox("Enabled", 340, 40, 80, 20)
+    If $DEBUG_LOG Then GUICtrlSetState($chkDebug, $GUI_CHECKED)
 
     GUICtrlCreateLabel("Modalities:", 10, 80)
-    GUICtrlCreateLabel(IniRead($INI_FILE, "Lists", "Modalities", ""), 120, 80, 280)
+    Local $inMods = GUICtrlCreateInput(IniRead($INI_FILE, "Lists", "Modalities", ""), 120, 80, 300)
+    
     GUICtrlCreateLabel("AETitles:", 10, 110)
-    GUICtrlCreateLabel(IniRead($INI_FILE, "Lists", "AETitles", ""), 120, 110, 280)
-    GUICtrlCreateLabel("Referring Physicians:", 10, 140)
-    GUICtrlCreateLabel(IniRead($INI_FILE, "Lists", "ReferringPhysicians", ""), 160, 140, 240)
+    Local $inAETs = GUICtrlCreateInput(IniRead($INI_FILE, "Lists", "AETitles", ""), 120, 110, 300)
+    
+    GUICtrlCreateLabel("Physicians:", 10, 140)
+    Local $inRefPhys = GUICtrlCreateInput(IniRead($INI_FILE, "Lists", "ReferringPhysicians", ""), 120, 140, 300)
+    
     GUICtrlCreateLabel("Procedures:", 10, 170)
-    GUICtrlCreateLabel(IniRead($INI_FILE, "Lists", "Procedures", ""), 120, 170, 280)
+    Local $inProcs = GUICtrlCreateInput(IniRead($INI_FILE, "Lists", "Procedures", ""), 120, 170, 300)
 
-    Local $btnClose = GUICtrlCreateButton("Close", 170, 230, 80, 30)
+    GUICtrlCreateLabel("Procedure Codes:", 10, 200)
+    Local $inCodes = GUICtrlCreateInput(IniRead($INI_FILE, "Lists", "ProcedureCodes", ""), 120, 200, 300)
+
+    ; Server Control Button inside Settings
+    Local $sBtnText = $g_bRunning ? "Stop Server" : "Start Server"
+    Local $btnStartStop = GUICtrlCreateButton($sBtnText, 10, 280, 100, 30)
+
+    Local $btnSave = GUICtrlCreateButton("Save Settings", 200, 280, 100, 30)
+    Local $btnClose = GUICtrlCreateButton("Close", 320, 280, 100, 30)
+    
     GUISetState(@SW_SHOW, $h)
 
     While 1
         Local $m = GUIGetMsg(1)
-        If $m = $GUI_EVENT_CLOSE Or $m = $btnClose Then ExitLoop
+        If $m[0] = $GUI_EVENT_CLOSE Or $m[0] = $btnClose Then ExitLoop
+        
+        If $m[0] = $btnStartStop Then
+            If $g_bRunning Then
+                CSVTS_StopServer()
+                DICOM_StopServer()
+                GUICtrlSetData($btnStartStop, "Start Server")
+                TrayItemSetState($g_idToggle, $TRAY_UNCHECKED)
+            Else
+                CSVTS_StartServer()
+                DICOM_StartServer()
+                GUICtrlSetData($btnStartStop, "Stop Server")
+                TrayItemSetState($g_idToggle, $TRAY_CHECKED)
+            EndIf
+        EndIf
+
+        If $m[0] = $btnSave Then
+            $SERVER_AET = GUICtrlRead($inAET)
+            $DICOM_PORT = GUICtrlRead($inDcmPort)
+            $TELNET_PORT = GUICtrlRead($inTelPort)
+            $DEBUG_LOG = (BitAND(GUICtrlRead($chkDebug), $GUI_CHECKED) = $GUI_CHECKED) ? 1 : 0
+            
+            IniWrite($INI_FILE, "Server", "AETitle", $SERVER_AET)
+            IniWrite($INI_FILE, "Server", "DicomPort", $DICOM_PORT)
+            IniWrite($INI_FILE, "Server", "TelnetPort", $TELNET_PORT)
+            IniWrite($INI_FILE, "Server", "DebugLog", $DEBUG_LOG)
+            
+            IniWrite($INI_FILE, "Lists", "Modalities", GUICtrlRead($inMods))
+            IniWrite($INI_FILE, "Lists", "AETitles", GUICtrlRead($inAETs))
+            IniWrite($INI_FILE, "Lists", "ReferringPhysicians", GUICtrlRead($inRefPhys))
+            IniWrite($INI_FILE, "Lists", "Procedures", GUICtrlRead($inProcs))
+            IniWrite($INI_FILE, "Lists", "ProcedureCodes", GUICtrlRead($inCodes))
+            
+            MsgBox(64, "Saved", "Settings saved successfully." & @CRLF & "Port changes require a server restart to take effect.", 0, $h)
+        EndIf
         Sleep(50)
     WEnd
     GUIDelete($h)
@@ -145,11 +202,15 @@ EndFunc
 ; LOGGING
 ; ===================================================================
 Func CSVTS_Log($s)
+    If Not $DEBUG_LOG Then Return
+
     If $g_hLogEdit Then
         Local $text = GUICtrlRead($g_hLogEdit)
         $text &= "[" & @HOUR & ":" & @MIN & ":" & @SEC & "] " & $s & @CRLF
         GUICtrlSetData($g_hLogEdit, $text)
     EndIf
+    
+    FileWriteLine(@ScriptDir & "\MWL_Server.log", "[" & @HOUR & ":" & @MIN & ":" & @SEC & "] " & $s)
     ConsoleWrite($s & @CRLF)
 EndFunc
 
@@ -186,6 +247,7 @@ Func CSVTS_StopServer()
 
     Local $empty[0][7]
     $g_aClients = $empty
+  
     $g_bRunning = False
 
     CSVTS_Log("Telnet server stopped")
@@ -243,7 +305,6 @@ Func CSVTS_ServerLoop()
 
         Local $data = TCPRecv($sock, 4096)
         
-        ; Handle disconnect gracefully
         If @error Then
             CSVTS_Log("Client disconnected unexpectedly on socket " & $g_aClients[$i][1])
             TCPCloseSocket($sock)
@@ -263,15 +324,13 @@ Func CSVTS_ServerLoop()
             WEnd
         EndIf
 
-        ; Check if an array is pending execution
         If IsArray($g_aClients[$i][4]) Then
             If TimerDiff($g_aClients[$i][5]) >= $APPEND_DELAY_MS Then
                 CSVTS_CommitPendingEntry($i)
-                $g_aClients[$i][3] = TimerInit() ; Reset timeout timer after successful entry
+                $g_aClients[$i][3] = TimerInit() 
             EndIf
         EndIf
 
-        ; Idle Disconnect Check
         If TimerDiff($g_aClients[$i][3]) >= $g_aClients[$i][6] Then
             CSVTS_Log("Client on socket " & $g_aClients[$i][1] & " timed out")
             TCPCloseSocket($sock)
@@ -302,7 +361,7 @@ Func CSVTS_UpdateIniList($key, $value)
 EndFunc
 
 ; ===================================================================
-; COMMIT PENDING ENTRY (Array Based - No COM Objects)
+; COMMIT PENDING ENTRY
 ; ===================================================================
 Func CSVTS_CommitPendingEntry($clientIndex)
     Local $entry = $g_aClients[$clientIndex][4]
@@ -324,7 +383,7 @@ Func CSVTS_CommitPendingEntry($clientIndex)
 
     Local $found = False
     For $i = 1 To UBound($lines) - 1
-        Local $cols = CSV_Split_RIS($lines[$i], 18)
+        Local $cols = CSV_Split_RIS($lines[$i], 22)
         If StringStripWS($cols[0], 3) = $patientID Then
             $lines[$i] = EntryToCSVLine_RIS($entry)
             $found = True
@@ -346,6 +405,7 @@ Func CSVTS_CommitPendingEntry($clientIndex)
     CSVTS_UpdateIniList("AETitles", $entry[8])
     CSVTS_UpdateIniList("ReferringPhysicians", $entry[14])
     CSVTS_UpdateIniList("Procedures", $entry[6])
+    CSVTS_UpdateIniList("ProcedureCodes", $entry[16])
 
     Local $sock = $g_aClients[$clientIndex][0]
     If $sock <> 0 And $sock <> -1 Then
@@ -409,7 +469,7 @@ Func DICOM_HandleClient($hSock)
         Local $data = TCPRecv($hSock, 8192, 1)
 
         If @error = 0 And BinaryLen($data) = 0 Then
-            If TimerDiff($timer) > 10000 Then ExitLoop ; Terminate idle hanging connection to prevent blocking
+            If TimerDiff($timer) > 10000 Then ExitLoop 
             Sleep(5)
             ContinueLoop
         EndIf
@@ -419,15 +479,15 @@ Func DICOM_HandleClient($hSock)
             ExitLoop
         EndIf
 
-        $timer = TimerInit() ; Reset timer on valid data
+        $timer = TimerInit()
         Local $pduType = BinaryMid($data, 1, 1)
 
         Switch $pduType
-            Case Binary("0x01") ; A-ASSOCIATE-RQ
+            Case Binary("0x01") 
                 DICOM_SendAAssociateAC($hSock)
                 $assocEstablished = True
 
-            Case Binary("0x04") ; P-DATA-TF
+            Case Binary("0x04") 
                 Local $txt = BinaryToString($data, 4)
 
                 If StringInStr($txt, "1.2.840.10008.1.1") Then
@@ -442,7 +502,7 @@ Func DICOM_HandleClient($hSock)
                     DICOM_SendMWLMatches($hSock, $msgID, $gPatients_RIS, $reqModality, $reqDate)
                 EndIf
 
-            Case Binary("0x05") ; A-RELEASE-RQ
+            Case Binary("0x05") 
                 DICOM_SendReleaseRSP($hSock)
                 ExitLoop
         EndSwitch
@@ -537,8 +597,8 @@ Func DICOM_SendMWLMatches($hSock, $msgID, ByRef $gPatients, $reqModality = "", $
 
         If Not MatchDateRange($rowDate, $reqDate) Then ContinueLoop
 
-        Local $row[18]
-        For $c = 0 To 17
+        Local $row[22]
+        For $c = 0 To 21
             $row[$c] = $gPatients[$i][$c]
         Next
 
@@ -569,6 +629,7 @@ Func DICOM_BuildCFindRspCommand($msgID, $status)
 EndFunc
 
 Func DICOM_BuildMWLDatasetFromCSV($row)
+    ; 22 Fields
     Local $PatientID        = $row[0]
     Local $PatientName      = $row[1]
     Local $Accession        = $row[2]
@@ -587,32 +648,46 @@ Func DICOM_BuildMWLDatasetFromCSV($row)
     Local $Status           = $row[15]
     Local $ProcedureCode    = $row[16]
     Local $ProcedureCodeDesc= $row[17]
+    Local $CodingScheme     = $row[18]
+    Local $PerformingPhys   = $row[19]
+    Local $StationName      = $row[20]
+    Local $Location         = $row[21]
 
     Local $ds = Binary("0x")
+    ; STRICT ASCENDING ORDER FOR ROOT DATASET
     $ds &= DICOM_ElemImplicit("0008","0005","ISO_IR 100") 
     $ds &= DICOM_ElemImplicit("0008","0050",$Accession)
     $ds &= DICOM_ElemImplicit("0008","0090",$RefPhysician)
+    
     $ds &= DICOM_ElemImplicit("0010","0010",$PatientName)
     $ds &= DICOM_ElemImplicit("0010","0020",$PatientID)
     $ds &= DICOM_ElemImplicit("0010","0030",$BirthDate)
     $ds &= DICOM_ElemImplicit("0010","0040",$Sex)
+    
     $ds &= DICOM_ElemImplicit("0020","000D",$StudyUID)
     $ds &= DICOM_ElemImplicit("0032","1060",$ReqProcDesc)
 
+    ; STRICT ASCENDING ORDER FOR SPS ITEM
     Local $item = Binary("0x")
     $item &= DICOM_ElemImplicit("0008","0060",$Modality)
     $item &= DICOM_ElemImplicit("0040","0001",$StationAET)
     $item &= DICOM_ElemImplicit("0040","0002",$ScheduledDate)
     $item &= DICOM_ElemImplicit("0040","0003",$ScheduledTime)
+    $item &= DICOM_ElemImplicit("0040","0006",$PerformingPhys)
     $item &= DICOM_ElemImplicit("0040","0007",$SPSDescription)
-    $item &= DICOM_ElemImplicit("0040","0009",$SPSID)
     
     If $ProcedureCode <> "" Then
         Local $codeItem = Binary("0x")
         $codeItem &= DICOM_ElemImplicit("0008","0100", $ProcedureCode)
+        $codeItem &= DICOM_ElemImplicit("0008","0102", $CodingScheme) 
         $codeItem &= DICOM_ElemImplicit("0008","0104", $ProcedureCodeDesc)
         $item &= DICOM_SequenceOneItem_Implicit("0040","0008", $codeItem)
     EndIf
+
+    ; MOVED 0040,0009 AFTER 0040,0008 TO FIX THE LOG ERROR
+    $item &= DICOM_ElemImplicit("0040","0009",$SPSID)
+    $item &= DICOM_ElemImplicit("0040","0010",$StationName)
+    $item &= DICOM_ElemImplicit("0040","0011",$Location)
 
     $ds &= DICOM_SequenceOneItem_Implicit("0040","0100",$item)
     $ds &= DICOM_ElemImplicit("0040","1001",$RequestedProcID)
@@ -724,7 +799,7 @@ Func DICOM_ExtractTagString($bin, $hexTagLE)
 EndFunc
 
 ; ===================================================================
-; CSV LOADER (Expanded to 18 columns)
+; CSV LOADER (Expanded to 22 columns)
 ; ===================================================================
 Func LoadPatientsCSV_RIS()
     If Not FileExists($CSV_FILE) Then
@@ -737,7 +812,7 @@ Func LoadPatientsCSV_RIS()
     If $fh = -1 Then Return SetError(1,0,0)
 
     Local $header = FileReadLine($fh)
-    Local $rows[0][18]
+    Local $rows[0][22]
 
     While 1
         Local $line = FileReadLine($fh)
@@ -746,12 +821,12 @@ Func LoadPatientsCSV_RIS()
         $line = StringStripWS($line, 3)
         If $line = "" Then ContinueLoop
 
-        Local $cols = CSV_Split_RIS($line, 18)
+        Local $cols = CSV_Split_RIS($line, 22)
         
         Local $count = UBound($rows)
-        ReDim $rows[$count + 1][18]
+        ReDim $rows[$count + 1][22]
 
-        For $i = 0 To 17
+        For $i = 0 To 21
             $rows[$count][$i] = $cols[$i]
         Next
     WEnd
@@ -802,7 +877,7 @@ EndFunc
 ; ===================================================================
 Func EntryToCSVLine_RIS($arr)
     Local $s = ""
-    For $i = 0 To 17
+    For $i = 0 To 21
         Local $f = $arr[$i]
         If StringInStr($f, ",") Or StringInStr($f, '"') Then
             $f = '"' & StringReplace($f, '"', '""') & '"'
@@ -851,8 +926,8 @@ Func CSVTS_ProcessDispCommand($clientIndex, $line)
     EndIf
 
     For $i = 1 To UBound($lines) - 1
-        Local $cols = CSV_Split_RIS($lines[$i], 18)
-        If UBound($cols) < 18 Then ContinueLoop
+        Local $cols = CSV_Split_RIS($lines[$i], 22)
+        If UBound($cols) < 22 Then ContinueLoop
         
         Local $match = False
         If $bMatchAll Then
@@ -883,7 +958,7 @@ Func CSVTS_ProcessClientLine($clientIndex, $line)
         Return
     EndIf
 
-    Local $fields = CSV_Split_RIS($line, 18)
+    Local $fields = CSV_Split_RIS($line, 22)
     If Not IsArray($fields) Then Return
 
     Local $PatientID       = StringStripWS($fields[0], 3)
@@ -904,6 +979,10 @@ Func CSVTS_ProcessClientLine($clientIndex, $line)
     Local $Status          = StringStripWS($fields[15], 3)
     Local $ProcCode        = StringStripWS($fields[16], 3)
     Local $ProcCodeDesc    = StringStripWS($fields[17], 3)
+    Local $CodingScheme    = StringStripWS($fields[18], 3)
+    Local $PerformingPhys  = StringStripWS($fields[19], 3)
+    Local $StationName     = StringStripWS($fields[20], 3)
+    Local $Location        = StringStripWS($fields[21], 3)
 
     ; Validate constraints
     If $PatientID = "" Or $PatientName = "" Or $Modality = "" Or $SPSDescription = "" Then Return
@@ -913,7 +992,7 @@ Func CSVTS_ProcessClientLine($clientIndex, $line)
     If Not StringRegExp($Status, "^[1-4]$") Then Return
     If $SchedTime <> "" And Not StringRegExp($SchedTime, "^\d{2}:\d{2}$") Then Return
 
-    Local $entry[18]
+    Local $entry[22]
     $entry[0] = $PatientID
     $entry[1] = $PatientName
     $entry[2] = $Accession
@@ -932,10 +1011,14 @@ Func CSVTS_ProcessClientLine($clientIndex, $line)
     $entry[15] = $Status
     $entry[16] = $ProcCode
     $entry[17] = $ProcCodeDesc
+    $entry[18] = $CodingScheme
+    $entry[19] = $PerformingPhys
+    $entry[20] = $StationName
+    $entry[21] = $Location
 
     $g_aClients[$clientIndex][4] = $entry
     $g_aClients[$clientIndex][5] = TimerInit()
-    $g_aClients[$clientIndex][6] += 1000 ; Extended disconnect timeout
+    $g_aClients[$clientIndex][6] += 1000 
     
     TCPSend($g_aClients[$clientIndex][0], "PENDING" & @CRLF)
     CSVTS_Log("PENDING PatientID " & $PatientID)
@@ -950,7 +1033,7 @@ Func DICOM_SendReleaseRSP($hSock)
 EndFunc
 
 ; ===================================================================
-; MAIN LOOP (Fixed Initialization)
+; MAIN LOOP
 ; ===================================================================
 CSVTS_TrayCreate()
 CSVTS_CreateMainGUI()
@@ -958,17 +1041,20 @@ CSVTS_CreateMainGUI()
 $gPatients_RIS = LoadPatientsCSV_RIS()
 CSVTS_StartServer()
 DICOM_StartServer()
+TrayItemSetState($g_idToggle, $TRAY_CHECKED)
 
 While 1
     Local $msg = TrayGetMsg()
     Switch $msg
         Case $g_idToggle
-            If BitAND(TrayItemGetState($g_idToggle), $TRAY_CHECKED) Then
-                CSVTS_StartServer()
-                DICOM_StartServer()
-            Else
+            If $g_bRunning Then
                 CSVTS_StopServer()
                 DICOM_StopServer()
+                TrayItemSetState($g_idToggle, $TRAY_UNCHECKED)
+            Else
+                CSVTS_StartServer()
+                DICOM_StartServer()
+                TrayItemSetState($g_idToggle, $TRAY_CHECKED)
             EndIf
         Case $g_idSettings
             CSVTS_ShowSettings()
