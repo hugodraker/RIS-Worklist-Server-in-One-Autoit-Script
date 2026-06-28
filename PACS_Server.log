@@ -1,0 +1,36 @@
+[21:43:09] DICOM C-STORE SCP listening on port 777
+[21:44:11] DICOM client connected (socket 1176)
+[21:44:26] DICOM client disconnected (socket 1176)
+[21:44:29] DICOM client connected (socket 1112)
+[21:44:44] DICOM client disconnected (socket 1112)
+[21:45:14] DICOM PACS SCP stopped
+[21:45:17] DICOM C-STORE SCP listening on port 777
+[09:22:42] DICOM client connected (socket 648)
+[09:22:57] DICOM client disconnected (socket 648)
+[09:25:42] DICOM C-STORE SCP listening on port 777
+[09:26:02] DICOM client connected (socket 764)
+[09:26:03] Image received and saved to: C:\Expenses\SR000000\00001.DCM
+[09:26:03] Triggering Telnet Client update for PatientID: 
+[09:26:03] Warning: Could not connect to Telnet Client at 127.0.0.1:23
+[09:26:03] DICOM client disconnected (socket 764)
+[09:26:04] DICOM client connected (socket 784)
+[09:26:04] Image received and saved to: C:\Expenses\SR000000\00002.DCM
+[09:26:04] Triggering Telnet Client update for PatientID: 283748
+[09:26:04] Warning: Could not connect to Telnet Client at 127.0.0.1:23
+[09:26:04] DICOM client disconnected (socket 784)
+[09:31:01] DICOM C-STORE SCP listening on port 777
+[09:31:13] DICOM client connected (socket 772)
+[09:31:28] DICOM client disconnected (socket 772)
+[09:31:36] DICOM client connected (socket 616)
+[09:31:36] Image received securely and saved to: C:\Expenses\SR000000\00003.DCM
+[09:31:36] Triggering Telnet Client update for PatientID: 283748
+[09:31:36] Warning: Could not connect to Telnet Client at 127.0.0.1:23
+[09:31:36] DICOM client disconnected (socket 616)
+[09:36:18] DICOM SCP listening on port 777
+[09:36:32] DICOM client connected (socket 272)
+[09:36:32] C-ECHO Request received. Replying with C-ECHO-RSP.
+[09:36:33] DICOM client disconnected (socket 272)
+[09:36:34] DICOM client connected (socket 272)
+[09:36:34] Image received securely and saved to: C:\Expenses\SR000000\00004.DCM
+[09:36:35] Triggering Telnet Client update for PatientID: 283748
+[09:36:35] DICOM client disconnected (socket 272)

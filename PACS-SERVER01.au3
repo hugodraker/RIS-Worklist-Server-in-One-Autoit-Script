@@ -32,7 +32,6 @@ Global $MAX_IMAGES_PER_FOLDER = 16000
 Global $g_bRunning = False
 Global $g_dicomsock = -1
 
-; Folder/File Tracking
 Global $g_CurrentFolderIndex = 0
 Global $g_CurrentFileIndex = 0
 
@@ -103,7 +102,6 @@ Func CSVTS_CreateMainGUI()
     GUISetOnEvent($GUI_EVENT_CLOSE, "CSVTS_HideMainGUI")
 
     $g_hStatusLabel = GUICtrlCreateLabel("Server status: Stopped", 10, 10, 500, 20)
-
     GUICtrlCreateLabel("Log:", 10, 60, 50, 20)
     $g_hLogEdit = GUICtrlCreateEdit("", 10, 85, 680, 280, BitOR($ES_AUTOVSCROLL, $ES_READONLY, $WS_VSCROLL))
 
@@ -188,7 +186,7 @@ Func DICOM_StartServer()
         Return
     EndIf
     $g_bRunning = True
-    CSVTS_Log("DICOM C-STORE SCP listening on port " & $DICOM_PORT)
+    CSVTS_Log("DICOM SCP listening on port " & $DICOM_PORT)
     If $g_hStatusLabel Then GUICtrlSetData($g_hStatusLabel, "Server status: Running on port " & $DICOM_PORT)
 EndFunc
 
@@ -214,7 +212,7 @@ Func DICOM_ServerLoop()
 EndFunc
 
 ; ===================================================================
-; DICOM CLIENT ROUTER & STORAGE
+; DICOM CLIENT ROUTER & TCP BUFFERING
 ; ===================================================================
 Func DICOM_HandleClient($hSock)
     Local $assocEstablished = False
@@ -223,11 +221,17 @@ Func DICOM_HandleClient($hSock)
     Local $tempFilePath = @ScriptDir & "\temp_" & $hSock & ".dcm"
     Local $hTempFile = -1
     Local $msgID = 1
+    
+    ; Setup default identifiers to build the File Meta Header
+    Local $currentSOPClass = "1.2.840.10008.5.1.4.1.1.7"
+    Local $currentSOPInst = "1.2.3.4.5.6.7.8.9.0"
+    
+    Local $streamBuffer = Binary("")
 
     While 1
-        Local $data = TCPRecv($hSock, 8192, 1)
+        Local $recvData = TCPRecv($hSock, 16384, 1)
 
-        If @error = 0 And BinaryLen($data) = 0 Then
+        If @error = 0 And BinaryLen($recvData) = 0 Then
             If TimerDiff($timer) > 15000 Then ExitLoop 
             Sleep(5)
             ContinueLoop
@@ -240,49 +244,89 @@ Func DICOM_HandleClient($hSock)
         EndIf
 
         $timer = TimerInit()
-        Local $pduType = BinaryMid($data, 1, 1)
+        $streamBuffer &= $recvData
 
-        Switch $pduType
-            Case Binary("0x01") ; A-ASSOCIATE-RQ
-                DICOM_SendAAssociateAC_Storage($hSock, $data)
-                $assocEstablished = True
+        While BinaryLen($streamBuffer) >= 6
+            Local $pduType = BinaryMid($streamBuffer, 1, 1)
+            Local $pduLen = DICOM_ReadUInt32BE($streamBuffer, 3)
+            
+            If BinaryLen($streamBuffer) < $pduLen + 6 Then ExitLoop
+            
+            Local $pduPayload = BinaryMid($streamBuffer, 7, $pduLen)
+            $streamBuffer = BinaryMid($streamBuffer, $pduLen + 7)
 
-            Case Binary("0x04") ; P-DATA-TF
-                ; Check if this is the start of a command/data stream
-                Local $pdvType = BinaryMid($data, 12, 1) ; Very basic PDV check
-                
-                ; If command, send C-STORE-RSP. If Data, append to file.
-                ; Simplified: We write the raw dataset to a temp file.
-                If Not $bReceivingImage Then
-                    $hTempFile = FileOpen($tempFilePath, 18) ; Overwrite + Binary
-                    $bReceivingImage = True
-                EndIf
-                
-                ; Strip PDU header (first 6 bytes) and append
-                Local $pduLen = BinaryLen($data)
-                If $pduLen > 6 Then
-                    FileWrite($hTempFile, BinaryMid($data, 7))
-                EndIf
-                
-                ; Send generic C-STORE-RSP (Success)
-                $msgID = DICOM_ExtractMessageID($data)
-                If $msgID <> 0 Then DICOM_SendCStoreRSP($hSock, $msgID)
+            Switch $pduType
+                Case Binary("0x01") ; A-ASSOCIATE-RQ
+                    DICOM_SendAAssociateAC_Storage($hSock, $pduPayload)
+                    $assocEstablished = True
 
-            Case Binary("0x05") ; A-RELEASE-RQ
-                If $hTempFile <> -1 Then FileClose($hTempFile)
-                DICOM_SendReleaseRSP($hSock)
-                
-                ; Move temp file to final location and process
-                If FileExists($tempFilePath) Then
-                    Local $finalPath = GetNextStoragePath()
-                    FileMove($tempFilePath, $finalPath, 1)
-                    CSVTS_Log("Image received and saved to: " & $finalPath)
+                Case Binary("0x04") ; P-DATA-TF
+                    Local $pos = 1
+                    While $pos <= $pduLen
+                        Local $pdvLen = DICOM_ReadUInt32BE($pduPayload, $pos)
+                        Local $pcid = Dec(Hex(BinaryMid($pduPayload, $pos + 4, 1)))
+                        Local $mch = Dec(Hex(BinaryMid($pduPayload, $pos + 5, 1)))
+                        
+                        Local $isCommand = BitAND($mch, 1)
+                        Local $isLastFragment = BitAND($mch, 2)
+                        
+                        Local $fragmentData = BinaryMid($pduPayload, $pos + 6, $pdvLen - 2)
+
+                        If $isCommand Then
+                            ; Extract vital Command fields
+                            Local $cmdField = DICOM_ExtractCommandUS($fragmentData, "00000001") ; 0000,0100
+                            Local $extMsgID = DICOM_ExtractCommandUS($fragmentData, "00001001") ; 0000,0110
+                            If $extMsgID <> 0 Then $msgID = $extMsgID
+                            
+                            If $cmdField = 0x0030 Then ; C-ECHO-RQ
+                                CSVTS_Log("C-ECHO Request received. Replying with C-ECHO-RSP.")
+                                DICOM_SendCEchoRSP($hSock, $msgID, $pcid)
+                            ElseIf $cmdField = 0x0001 Then ; C-STORE-RQ
+                                Local $tClass = DICOM_ExtractCommandString($fragmentData, "00000200") ; 0000,0002
+                                Local $tInst = DICOM_ExtractCommandString($fragmentData, "00000010")  ; 0000,1000
+                                If $tClass <> "" Then $currentSOPClass = $tClass
+                                If $tInst <> "" Then $currentSOPInst = $tInst
+                            EndIf
+                        Else
+                            ; Image Data
+                            If Not $bReceivingImage Then
+                                $hTempFile = FileOpen($tempFilePath, 18) ; Overwrite + Binary
+                                
+                                ; Write Part 10 Preamble
+                                Local $preamble = Binary("0x0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000")
+                                FileWrite($hTempFile, $preamble)
+                                FileWrite($hTempFile, Binary("0x4449434D")) ; "DICM"
+                                
+                                ; WRITE MISSING FILE META HEADER (Fixes Viewer Warning!)
+                                Local $fmi = DICOM_CreateFMI($currentSOPClass, $currentSOPInst, "1.2.840.10008.1.2")
+                                FileWrite($hTempFile, $fmi)
+                                
+                                $bReceivingImage = True
+                            EndIf
+                            
+                            FileWrite($hTempFile, $fragmentData)
+                        EndIf
+
+                        If $isLastFragment And Not $isCommand Then
+                            DICOM_SendCStoreRSP($hSock, $msgID, $pcid)
+                        EndIf
+                        
+                        $pos += ($pdvLen + 4)
+                    WEnd
+
+                Case Binary("0x05") ; A-RELEASE-RQ
+                    If $hTempFile <> -1 Then FileClose($hTempFile)
+                    DICOM_SendReleaseRSP($hSock)
                     
-                    ; Process the saved DICOM file and trigger Telnet
-                    ProcessAndTriggerTelnet($finalPath)
-                EndIf
-                ExitLoop
-        EndSwitch
+                    If FileExists($tempFilePath) Then
+                        Local $finalPath = GetNextStoragePath()
+                        FileMove($tempFilePath, $finalPath, 1)
+                        CSVTS_Log("Image received securely and saved to: " & $finalPath)
+                        ProcessAndTriggerTelnet($finalPath)
+                    EndIf
+                    ExitLoop 2 
+            EndSwitch
+        WEnd
     WEnd
 EndFunc
 
@@ -292,7 +336,6 @@ EndFunc
 Func ProcessAndTriggerTelnet($filePath)
     Local $bData = FileRead($filePath)
     
-    ; Extract Tags
     Local $PatientID       = DICOM_ExtractTagStringSafe($bData, "10002000")
     Local $PatientName     = DICOM_ExtractTagStringSafe($bData, "10001000")
     Local $Accession       = DICOM_ExtractTagStringSafe($bData, "08005000")
@@ -305,34 +348,32 @@ Func ProcessAndTriggerTelnet($filePath)
     Local $StudyUID        = DICOM_ExtractTagStringSafe($bData, "20000D00")
     Local $RefPhys         = DICOM_ExtractTagStringSafe($bData, "08009000")
     
-    ; Map to 22 Columns (Status = 4)
     Local $row[22]
     $row[0] = $PatientID
     $row[1] = $PatientName
     $row[2] = $Accession
     $row[3] = $BirthDate
     $row[4] = $Sex
-    $row[5] = "" ; SPSID (Often not in C-STORE payload)
-    $row[6] = "" ; SPSDescription
-    $row[7] = "" ; RequestedProcID
-    $row[8] = "" ; StationAET
+    $row[5] = "" 
+    $row[6] = "" 
+    $row[7] = "" 
+    $row[8] = "" 
     $row[9] = $Modality
     $row[10] = $StudyDate
     $row[11] = $StudyTime
     $row[12] = $StudyDesc
     $row[13] = $StudyUID
     $row[14] = $RefPhys
-    $row[15] = "4" ; COMPLETED
-    $row[16] = "" ; ProcedureCode
-    $row[17] = "" ; ProcedureCodeDesc
-    $row[18] = "" ; CodingScheme
-    $row[19] = "" ; PerformingPhys
-    $row[20] = "" ; StationName
-    $row[21] = "" ; Location
+    $row[15] = "4" 
+    $row[16] = "" 
+    $row[17] = "" 
+    $row[18] = "" 
+    $row[19] = "" 
+    $row[20] = "" 
+    $row[21] = "" 
 
     Local $csvLine = EntryToCSVLine_RIS($row)
     
-    ; Write to STOR.CSV
     If Not FileExists($CSV_FILE) Then
         Local $hf = FileOpen($CSV_FILE, 2)
         FileWriteLine($hf, $CSV_HEADER)
@@ -342,41 +383,63 @@ Func ProcessAndTriggerTelnet($filePath)
     FileWriteLine($hfAppend, $csvLine)
     FileClose($hfAppend)
     
-    ; Trigger Telnet
     CSVTS_Log("Triggering Telnet Client update for PatientID: " & $PatientID)
     Local $tSock = TCPConnect($TELNET_CLIENT_IP, $TELNET_CLIENT_PORT)
     If $tSock <> -1 Then
         TCPSend($tSock, $csvLine & @CRLF)
         TCPCloseSocket($tSock)
-    Else
-        CSVTS_Log("Warning: Could not connect to Telnet Client at " & $TELNET_CLIENT_IP & ":" & $TELNET_CLIENT_PORT)
     EndIf
 EndFunc
 
 ; ===================================================================
-; DICOM PROTOCOL HELPERS
+; DICOM PROTOCOL RESPONSES
 ; ===================================================================
-Func DICOM_SendAAssociateAC_Storage($hSock, $rqData)
+Func DICOM_SendAAssociateAC_Storage($hSock, $rqPayload)
     Local $paddedAET = StringLeft($SERVER_AET & "                ", 16)
     Local $hexAET = StringToHexStr($paddedAET)
     
-    ; Build a permissive Accept responding to the association
-    Local $pdu1 = Binary("0x0200000000D400010000" & $hexAET & "414E592D534355202020202020202020" & _
-        "0000000000000000000000000000000000000000000000000000000000000000")
-
-    ; Accept Presentation Context 1 (Implicit VR Little Endian)
-    Local $pdu2 = Binary("0x10000015312E322E3834302E31303030382E332E312E312E31" & _
-        "210000190100000040000011312E322E3834302E31303030382E312E32" & _
-        "210000190300000040000011312E322E3834302E31303030382E312E32")
+    Local $fixedBody = Binary("0x00010000") & Binary("0x" & $hexAET) & Binary("0x414E592D5343552020202020202020200000000000000000000000000000000000000000000000000000000000000000")
+    
+    Local $pduLen = BinaryLen($rqPayload)
+    Local $pos = 69 
+    Local $pdu2 = Binary("0x")
+    Local $hasAppContext = False
+    
+    While $pos + 4 <= $pduLen
+        Local $itemType = Dec(Hex(BinaryMid($rqPayload, $pos, 1)))
+        Local $bHigh = Dec(Hex(BinaryMid($rqPayload, $pos + 2, 1)))
+        Local $bLow = Dec(Hex(BinaryMid($rqPayload, $pos + 3, 1)))
+        Local $itemLen = ($bHigh * 256) + $bLow
+        
+        If $pos + 4 + $itemLen > $pduLen + 1 Then ExitLoop
+        
+        If $itemType = 0x10 Then
+            $pdu2 &= BinaryMid($rqPayload, $pos, $itemLen + 4)
+            $hasAppContext = True
+        ElseIf $itemType = 0x20 Then
+            Local $pcid = Dec(Hex(BinaryMid($rqPayload, $pos + 4, 1)))
+            $pdu2 &= Binary("0x21000019") & Binary("0x" & StringFormat("%02X", $pcid)) & Binary("0x000000") & _
+                     Binary("0x40000011312E322E3834302E31303030382E312E32")
+        EndIf
+        
+        Local $step = $itemLen + 4
+        If $step <= 4 Then $step = 4
+        $pos += $step
+    WEnd
+    
+    If Not $hasAppContext Then
+        $pdu2 = Binary("0x10000015312E322E3834302E31303030382E332E312E312E31") & $pdu2
+    EndIf
 
     Local $pdu3 = Binary("0x5000003951000004000040005200001E312E322E3832362E302E312E333638303034332E322E313339362E3939395500000B43686172727561536F6674")
 
-    TCPSend($hSock, $pdu1)
-    TCPSend($hSock, $pdu2)
-    TCPSend($hSock, $pdu3)
+    Local $totalPayloadLength = BinaryLen($fixedBody) + BinaryLen($pdu2) + BinaryLen($pdu3)
+    Local $pduHeader = Binary("0x0200") & DICOM_UInt32BE($totalPayloadLength)
+
+    TCPSend($hSock, $pduHeader & $fixedBody & $pdu2 & $pdu3)
 EndFunc
 
-Func DICOM_SendCStoreRSP($hSock, $msgID)
+Func DICOM_SendCStoreRSP($hSock, $msgID, $pcid = 1)
     Local $cmd = Binary("0x")
     $cmd &= DICOM_ElemImplicit("0000", "0002", "1.2.840.10008.1.1")
     $cmd &= DICOM_ElemImplicitUS("0000", "0100", 0x8001) ; C-STORE-RSP
@@ -387,7 +450,21 @@ Func DICOM_SendCStoreRSP($hSock, $msgID)
     Local $groupLen = BinaryLen($cmd)
     Local $cmdFull = DICOM_ElemImplicitUL("0000", "0000", $groupLen) & $cmd
 
-    TCPSend($hSock, DICOM_WrapCommandAsSinglePDV($cmdFull, 1))
+    TCPSend($hSock, DICOM_WrapCommandAsSinglePDV($cmdFull, $pcid))
+EndFunc
+
+Func DICOM_SendCEchoRSP($hSock, $msgID, $pcid = 1)
+    Local $cmd = Binary("0x")
+    $cmd &= DICOM_ElemImplicit("0000", "0002", "1.2.840.10008.1.1") 
+    $cmd &= DICOM_ElemImplicitUS("0000", "0100", 0x8030) ; C-ECHO-RSP
+    $cmd &= DICOM_ElemImplicitUS("0000", "0120", $msgID) 
+    $cmd &= DICOM_ElemImplicitUS("0000", "0800", 0x0101) 
+    $cmd &= DICOM_ElemImplicitUS("0000", "0900", 0x0000) ; Success
+
+    Local $groupLen = BinaryLen($cmd)
+    Local $cmdFull = DICOM_ElemImplicitUL("0000", "0000", $groupLen) & $cmd
+
+    TCPSend($hSock, DICOM_WrapCommandAsSinglePDV($cmdFull, $pcid))
 EndFunc
 
 Func DICOM_SendReleaseRSP($hSock)
@@ -396,12 +473,81 @@ Func DICOM_SendReleaseRSP($hSock)
 EndFunc
 
 ; ===================================================================
-; SAFE DATA EXTRACTORS
+; FILE META INFORMATION BUILDER (Fixes the Corruption Warning)
 ; ===================================================================
+Func DICOM_CreateFMI($sopClass, $sopInstance, $tsUID)
+    Local $fmi = Binary("")
+    $fmi &= Binary("0x020001004F420000020000000001")
+    
+    If Mod(StringLen($sopClass), 2) <> 0 Then $sopClass &= Chr(0)
+    Local $bSOPClass = StringToBinary($sopClass)
+    Local $lenHex = StringFormat("%04X", BinaryLen($bSOPClass))
+    $lenHex = StringMid($lenHex, 3, 2) & StringMid($lenHex, 1, 2)
+    $fmi &= Binary("0x020002005549") & Binary("0x" & $lenHex) & $bSOPClass
+    
+    If Mod(StringLen($sopInstance), 2) <> 0 Then $sopInstance &= Chr(0)
+    Local $bSOPInst = StringToBinary($sopInstance)
+    $lenHex = StringFormat("%04X", BinaryLen($bSOPInst))
+    $lenHex = StringMid($lenHex, 3, 2) & StringMid($lenHex, 1, 2)
+    $fmi &= Binary("0x020003005549") & Binary("0x" & $lenHex) & $bSOPInst
+    
+    Local $ts = $tsUID
+    If Mod(StringLen($ts), 2) <> 0 Then $ts &= Chr(0)
+    Local $bTS = StringToBinary($ts)
+    $lenHex = StringFormat("%04X", BinaryLen($bTS))
+    $lenHex = StringMid($lenHex, 3, 2) & StringMid($lenHex, 1, 2)
+    $fmi &= Binary("0x020010005549") & Binary("0x" & $lenHex) & $bTS
+    
+    Local $imp = "1.2.276.0.7230010.3.0.3.6.4"
+    If Mod(StringLen($imp), 2) <> 0 Then $imp &= Chr(0)
+    Local $bImp = StringToBinary($imp)
+    $lenHex = StringFormat("%04X", BinaryLen($bImp))
+    $lenHex = StringMid($lenHex, 3, 2) & StringMid($lenHex, 1, 2)
+    $fmi &= Binary("0x020012005549") & Binary("0x" & $lenHex) & $bImp
+
+    Local $fmiLen = BinaryLen($fmi)
+    Local $lenHex4 = StringFormat("%08X", $fmiLen)
+    $lenHex4 = StringMid($lenHex4, 7, 2) & StringMid($lenHex4, 5, 2) & StringMid($lenHex4, 3, 2) & StringMid($lenHex4, 1, 2)
+    Local $groupLenElem = Binary("0x02000000554C0400") & Binary("0x" & $lenHex4)
+
+    Return $groupLenElem & $fmi
+EndFunc
+
+; ===================================================================
+; SAFE COMMAND EXTRACTORS
+; ===================================================================
+Func DICOM_ExtractCommandString($bin, $tagHexLE)
+    Local $hex = Hex($bin)
+    Local $pos = StringInStr($hex, $tagHexLE)
+    If $pos > 0 Then
+        Local $lenHex = StringMid($hex, $pos + 8, 8)
+        Local $length = Dec(StringMid($lenHex, 7, 2) & StringMid($lenHex, 5, 2) & StringMid($lenHex, 3, 2) & StringMid($lenHex, 1, 2))
+        If $length > 0 And $length < 1000 Then
+            Return StringStripWS(StringReplace(BinaryToString(Binary("0x" & StringMid($hex, $pos + 16, $length * 2))), Chr(0), ""), 3)
+        EndIf
+    EndIf
+    Return ""
+EndFunc
+
+Func DICOM_ExtractCommandUS($bin, $tagHexLE)
+    Local $hex = Hex($bin)
+    Local $pos = StringInStr($hex, $tagHexLE)
+    If $pos > 0 Then
+        Local $valHex = StringMid($hex, $pos + 16, 4)
+        Return Dec(StringMid($valHex, 3, 2) & StringMid($valHex, 1, 2))
+    EndIf
+    Return 0
+EndFunc
+
+Func DICOM_ReadUInt32BE($bin, $offset)
+    Return Dec(Hex(BinaryMid($bin, $offset, 1))) * 16777216 + _
+           Dec(Hex(BinaryMid($bin, $offset+1, 1))) * 65536 + _
+           Dec(Hex(BinaryMid($bin, $offset+2, 1))) * 256 + _
+           Dec(Hex(BinaryMid($bin, $offset+3, 1)))
+EndFunc
+
 Func DICOM_ExtractTagStringSafe($bin, $hexTagLE)
     Local $hex = Hex($bin)
-    
-    ; Prevent extraction freezing by truncating search before Pixel Data (7FE0,0010 -> E07F1000)
     Local $pixelPos = StringInStr($hex, "E07F1000")
     If $pixelPos > 0 Then $hex = StringLeft($hex, $pixelPos)
     
@@ -415,27 +561,6 @@ Func DICOM_ExtractTagStringSafe($bin, $hexTagLE)
         Return StringStripWS(StringReplace(BinaryToString(Binary("0x" & StringMid($hex, $pos + 16, $length * 2))), Chr(0), ""), 3)
     EndIf
     Return ""
-EndFunc
-
-Func DICOM_ExtractMessageID($bin)
-    Local $pos = 13
-    Local $len = BinaryLen($bin)
-    While $pos + 8 <= $len
-        Local $g = Hex(BinaryMid($bin, $pos+1, 1)) & Hex(BinaryMid($bin, $pos, 1))
-        Local $e = Hex(BinaryMid($bin, $pos+3, 1)) & Hex(BinaryMid($bin, $pos+2, 1))
-        Local $vlInt = Dec(Hex(BinaryMid($bin, $pos+7, 1)) & Hex(BinaryMid($bin, $pos+6, 1)) & Hex(BinaryMid($bin, $pos+5, 1)) & Hex(BinaryMid($bin, $pos+4, 1)))
-
-        Local $valPos = $pos + 8
-        If $g = "0000" And $e = "0110" And $vlInt = 2 Then
-            Return Dec(Hex(BinaryMid($bin, $valPos+1, 1)) & Hex(BinaryMid($bin, $valPos, 1)))
-        EndIf
-        
-        ; Safety break to avoid reading past command group into large datasets
-        If $g <> "0000" Then ExitLoop 
-        
-        $pos = $valPos + $vlInt
-    WEnd
-    Return 1
 EndFunc
 
 ; ===================================================================
