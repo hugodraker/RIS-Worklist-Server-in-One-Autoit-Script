@@ -1,0 +1,4 @@
+PatientID,PatientName,Accession,BirthDate,Sex,SPSID,SPSDescription,RequestedProcedureID,StationAET,Modality,ScheduledDate,ScheduledTime,RequestedProcDesc,StudyInstanceUID,ReferringPhysicianName,Status,ProcedureCode,ProcedureCodeDesc,CodingScheme,PerformingPhysician,StationName,Location
+Connected to RIS Telnet Server. Waiting for data...
+10001,John Doe,ACC001,19800101,M,SPS001,BMD BASELINE,RP001,BMD,OT,20260626,09:00,BMD BASELINE,1.2.3.4.5.1,Dr. Smith,1,PCODE01,BMD BASELINE,99LOCAL,Dr. House,ROOM1,ER
+1111111,2222222,3333333,20000101,M,222222222,44444444,44444444,ssss,OT,20260629,21:00,3333,eeee,eeee,1,fffff,ffffffffffff,ssssss,ssssss,ssssss,sssssss
