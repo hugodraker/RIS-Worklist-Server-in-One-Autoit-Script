@@ -16,11 +16,17 @@
  * - Flat Edit menu: row entries + Add Row + Exit
  * - Edit window: 3 Name/Description pairs + Browse + Auto-Start + Save/Delete/Cancel
  * - First two rows cannot be deleted
+ * - Window size and position are saved to [Window] in the INI on exit
  * - No popup messages on errors (silent by design)
-gcc -O2 -mwindows -o PACS-MANAGER.exe PACS-MANAGER.c -luser32 -lgdi32 -lcomdlg32 -lshell32 -lkernel32
-
-MSVC (Developer Command Prompt):
-cl /O2 PACS-MANAGER.c /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib comdlg32.lib shell32.lib kernel32.lib
+ *
+ * Build:
+ *   MinGW-w64:
+ *     gcc -O2 -mwindows -o PACS-MANAGER.exe PACS-MANAGER.c \
+ *         -luser32 -lgdi32 -lcomdlg32 -lshell32 -lkernel32
+ *
+ *   MSVC (Developer Command Prompt):
+ *     cl /O2 PACS-MANAGER.c /link /SUBSYSTEM:WINDOWS \
+ *         user32.lib gdi32.lib comdlg32.lib shell32.lib kernel32.lib
  */
 
 #define WIN32_LEAN_AND_MEAN
@@ -90,6 +96,11 @@ enum {
     IDE_SAVE  = 200, IDE_DEL,   IDE_CANCEL
 };
 
+/* Runtime-loaded Toolhelp32 signatures */
+typedef HANDLE (WINAPI *PFN_CreateToolhelp32Snapshot)(DWORD, DWORD);
+typedef BOOL   (WINAPI *PFN_Process32First)(HANDLE, LPPROCESSENTRY32);
+typedef BOOL   (WINAPI *PFN_Process32Next) (HANDLE, LPPROCESSENTRY32);
+
 /* ------------------------------------------------------------------ */
 /* Globals                                                             */
 /* ------------------------------------------------------------------ */
@@ -122,6 +133,40 @@ static HWND      g_hEdCancel = NULL;
 static const char kClassMain[] = "PACSManagerWnd";
 static const char kClassEdit[] = "PACSManagerEditWnd";
 
+static PFN_CreateToolhelp32Snapshot pCreateToolhelp32Snapshot = NULL;
+static PFN_Process32First           pProcess32First           = NULL;
+static PFN_Process32Next            pProcess32Next            = NULL;
+
+/* ------------------------------------------------------------------ */
+/* Runtime Toolhelp loader                                             */
+/*                                                                     */
+/* Some Windows SDK import libs only export the unsuffixed names       */
+/* (Process32First / Process32Next).  Try those first, then fall       */
+/* back to the explicit "A" variants.                                  */
+/* ------------------------------------------------------------------ */
+
+static void init_toolhelp(void)
+{
+    HMODULE hK32 = GetModuleHandleA("kernel32.dll");
+    if (!hK32) hK32 = LoadLibraryA("kernel32.dll");
+    if (!hK32) return;
+
+    pCreateToolhelp32Snapshot =
+        (PFN_CreateToolhelp32Snapshot)GetProcAddress(hK32, "CreateToolhelp32Snapshot");
+
+    pProcess32First = (PFN_Process32First)GetProcAddress(hK32, "Process32First");
+    if (!pProcess32First) {
+        pProcess32First =
+            (PFN_Process32First)GetProcAddress(hK32, "Process32FirstA");
+    }
+
+    pProcess32Next = (PFN_Process32Next)GetProcAddress(hK32, "Process32Next");
+    if (!pProcess32Next) {
+        pProcess32Next =
+            (PFN_Process32Next)GetProcAddress(hK32, "Process32NextA");
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* Small helpers                                                       */
 /* ------------------------------------------------------------------ */
@@ -137,7 +182,6 @@ static void str_lower(char *s)
 static void strip_quotes_trim(char *s)
 {
     if (!s) return;
-    /* trailing trim */
     size_t n = strlen(s);
     while (n > 0) {
         char c = s[n - 1];
@@ -145,7 +189,6 @@ static void strip_quotes_trim(char *s)
             s[--n] = 0;
         } else break;
     }
-    /* leading trim */
     size_t lead = 0;
     while (s[lead] == ' ' || s[lead] == '\t' || s[lead] == '"')
         lead++;
@@ -164,7 +207,6 @@ static void get_exe_basename(const char *path, char *out, size_t outsz)
     lstrcpynA(tmp, path, sizeof(tmp));
     strip_quotes_trim(tmp);
 
-    /* normalize separators */
     for (char *p = tmp; *p; ++p) {
         if (*p == '/') *p = '\\';
     }
@@ -182,8 +224,7 @@ static void get_exe_basename(const char *path, char *out, size_t outsz)
 static void resolve_ini_path(void)
 {
     GetModuleFileNameA(NULL, g_iniPath, sizeof(g_iniPath));
-    /* strip extension */
-    char *dot = strrchr(g_iniPath, '.');
+    char *dot   = strrchr(g_iniPath, '.');
     char *slash = strrchr(g_iniPath, '\\');
     if (dot && (!slash || dot > slash)) {
         *dot = 0;
@@ -250,7 +291,6 @@ static void load_rows_from_ini(void)
         GetPrivateProfileStringA(sec, "TargetB", "", r->szTargetB, sizeof(r->szTargetB), g_iniPath);
     }
 
-    /* Guarantee at least 2 rows */
     while (g_nRows < 2) {
         ROW *r = &g_rows[g_nRows];
         wsprintfA(r->szName,  "Desc%d",  g_nRows + 1);
@@ -263,7 +303,6 @@ static void load_rows_from_ini(void)
 
 static void save_rows_to_ini(void)
 {
-    /* Wipe existing Row* sections */
     for (int i = 1; i <= MAX_ROWS; ++i) {
         char sec[32];
         wsprintfA(sec, "Row%d", i);
@@ -280,6 +319,36 @@ static void save_rows_to_ini(void)
     }
 }
 
+static void save_window_placement(void)
+{
+    if (!g_hMain) return;
+
+    WINDOWPLACEMENT wp;
+    memset(&wp, 0, sizeof(wp));
+    wp.length = sizeof(wp);
+    if (!GetWindowPlacement(g_hMain, &wp)) return;
+
+    char buf[32];
+
+    wsprintfA(buf, "%d", (int)wp.rcNormalPosition.left);
+    WritePrivateProfileStringA("Window", "X", buf, g_iniPath);
+
+    wsprintfA(buf, "%d", (int)wp.rcNormalPosition.top);
+    WritePrivateProfileStringA("Window", "Y", buf, g_iniPath);
+
+    wsprintfA(buf, "%d",
+              (int)(wp.rcNormalPosition.right - wp.rcNormalPosition.left));
+    WritePrivateProfileStringA("Window", "W", buf, g_iniPath);
+
+    wsprintfA(buf, "%d",
+              (int)(wp.rcNormalPosition.bottom - wp.rcNormalPosition.top));
+    WritePrivateProfileStringA("Window", "H", buf, g_iniPath);
+
+    WritePrivateProfileStringA("Window", "Maximized",
+                               wp.showCmd == SW_SHOWMAXIMIZED ? "1" : "0",
+                               g_iniPath);
+}
+
 /* ------------------------------------------------------------------ */
 /* Process detection / control                                         */
 /* ------------------------------------------------------------------ */
@@ -287,15 +356,17 @@ static void save_rows_to_ini(void)
 static int is_process_running(const char *exeLower)
 {
     if (!exeLower || !exeLower[0]) return 0;
+    if (!pCreateToolhelp32Snapshot || !pProcess32First || !pProcess32Next)
+        return 0;
 
-    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    HANDLE hSnap = pCreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnap == INVALID_HANDLE_VALUE) return 0;
 
     PROCESSENTRY32 pe;
     pe.dwSize = sizeof(pe);
 
     int found = 0;
-    if (Process32First(hSnap, &pe)) {
+    if (pProcess32First(hSnap, &pe)) {
         do {
             char name[MAX_PATH];
             lstrcpynA(name, pe.szExeFile, sizeof(name));
@@ -304,7 +375,7 @@ static int is_process_running(const char *exeLower)
                 found = 1;
                 break;
             }
-        } while (Process32Next(hSnap, &pe));
+        } while (pProcess32Next(hSnap, &pe));
     }
     CloseHandle(hSnap);
     return found;
@@ -313,14 +384,16 @@ static int is_process_running(const char *exeLower)
 static void stop_process_by_name(const char *exeLower)
 {
     if (!exeLower || !exeLower[0]) return;
+    if (!pCreateToolhelp32Snapshot || !pProcess32First || !pProcess32Next)
+        return;
 
-    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    HANDLE hSnap = pCreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnap == INVALID_HANDLE_VALUE) return;
 
     PROCESSENTRY32 pe;
     pe.dwSize = sizeof(pe);
 
-    if (Process32First(hSnap, &pe)) {
+    if (pProcess32First(hSnap, &pe)) {
         do {
             char name[MAX_PATH];
             lstrcpynA(name, pe.szExeFile, sizeof(name));
@@ -332,7 +405,7 @@ static void stop_process_by_name(const char *exeLower)
                     CloseHandle(hProc);
                 }
             }
-        } while (Process32Next(hSnap, &pe));
+        } while (pProcess32Next(hSnap, &pe));
     }
     CloseHandle(hSnap);
 }
@@ -347,7 +420,6 @@ static void start_process_by_path(const char *fullPath)
 
     if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) return;
 
-    /* Use the EXE's own folder as the working directory if we can */
     char dir[MAX_PATH] = {0};
     lstrcpynA(dir, path, sizeof(dir));
     char *slash = strrchr(dir, '\\');
@@ -359,7 +431,6 @@ static void start_process_by_path(const char *fullPath)
     }
 }
 
-/* Pump messages for up to ms while polling for the process appearance/absence */
 static void wait_process_state(const char *exeLower, int wantAppear, int ms)
 {
     if (!exeLower || !exeLower[0]) return;
@@ -391,7 +462,6 @@ static void layout_buttons(void)
     int W = rc.right;
     int H = rc.bottom;
 
-    /* Horizontal: 4:1:1 ratio */
     int usableW = W - GAP * 4;
     if (usableW < MIN_COL_U * 6) usableW = MIN_COL_U * 6;
     int colU = usableW / 6;
@@ -404,7 +474,6 @@ static void layout_buttons(void)
     int xStart = (W - gridW) / 2;
     if (xStart < GAP) xStart = GAP;
 
-    /* Vertical: rows split available height */
     int usableH = H - (Y_TOP + GAP) - (g_nRows - 1) * GAP;
     if (usableH < g_nRows * BTN_H_MIN) usableH = g_nRows * BTN_H_MIN;
     int btnH = usableH / g_nRows;
@@ -444,6 +513,7 @@ static void refresh_row(int i)
         g_rowState[i] = ST_NONE;
         SetWindowTextA(hLbl, r->szName);
         InvalidateRect(hLbl, NULL, TRUE);
+        UpdateWindow(hLbl);
         return;
     }
 
@@ -457,6 +527,7 @@ static void refresh_row(int i)
     g_rowState[i] = running ? ST_RUN : ST_STOP;
     SetWindowTextA(hLbl, buf);
     InvalidateRect(hLbl, NULL, TRUE);
+    UpdateWindow(hLbl);
 }
 
 static void refresh_all_rows(void)
@@ -490,12 +561,10 @@ static void rebuild_edit_menu(void)
 {
     if (!g_hEditMenu) return;
 
-    /* Wipe */
     int count = GetMenuItemCount(g_hEditMenu);
     for (int k = count - 1; k >= 0; --k)
         DeleteMenu(g_hEditMenu, k, MF_BYPOSITION);
 
-    /* Row entries */
     for (int i = 0; i < g_nRows; ++i) {
         const char *label = g_rows[i].szName[0] ? g_rows[i].szName : "(empty)";
         AppendMenuA(g_hEditMenu, MF_STRING, ID_MENU_BASE + i, label);
@@ -612,8 +681,9 @@ static void do_browse(HWND hParent, HWND hEdit)
 
 static void build_edit_controls(HWND hWnd)
 {
-    /* ---- Group 0: Main button ---- */
     HWND h;
+
+    /* Group 0 */
     h = CreateWindowExA(0, "STATIC", "Main button (Description = full path to .EXE)",
                        WS_CHILD | WS_VISIBLE, 15, 12, 580, 16, hWnd, 0, g_hInst, NULL);
     SendMessage(h, WM_SETFONT, (WPARAM)g_hFont, TRUE);
@@ -644,7 +714,7 @@ static void build_edit_controls(HWND hWnd)
                                   (HMENU)(INT_PTR)IDE_BROW0, g_hInst, NULL);
     SendMessage(g_edBrow[0], WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
-    /* ---- Group 1: Helper A ---- */
+    /* Group 1 */
     h = CreateWindowExA(0, "STATIC", "Helper A (column 2 - launches any file)",
                        WS_CHILD | WS_VISIBLE, 15, 100, 580, 16, hWnd, 0, g_hInst, NULL);
     SendMessage(h, WM_SETFONT, (WPARAM)g_hFont, TRUE);
@@ -675,7 +745,7 @@ static void build_edit_controls(HWND hWnd)
                                   (HMENU)(INT_PTR)IDE_BROW1, g_hInst, NULL);
     SendMessage(g_edBrow[1], WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
-    /* ---- Group 2: Helper B ---- */
+    /* Group 2 */
     h = CreateWindowExA(0, "STATIC", "Helper B (column 3 - launches any file)",
                        WS_CHILD | WS_VISIBLE, 15, 188, 580, 16, hWnd, 0, g_hInst, NULL);
     SendMessage(h, WM_SETFONT, (WPARAM)g_hFont, TRUE);
@@ -706,7 +776,7 @@ static void build_edit_controls(HWND hWnd)
                                   (HMENU)(INT_PTR)IDE_BROW2, g_hInst, NULL);
     SendMessage(g_edBrow[2], WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
-    /* ---- Auto-Start ---- */
+    /* Auto-Start */
     h = CreateWindowExA(0, "STATIC", "Auto-Start at launch",
                        WS_CHILD | WS_VISIBLE, 15, 276, 130, 18, hWnd, 0, g_hInst, NULL);
     SendMessage(h, WM_SETFONT, (WPARAM)g_hFont, TRUE);
@@ -716,7 +786,7 @@ static void build_edit_controls(HWND hWnd)
                                 150, 274, 20, 20, hWnd,
                                 (HMENU)(INT_PTR)IDE_AUTO, g_hInst, NULL);
 
-    /* ---- Save / Delete / Cancel ---- */
+    /* Save / Delete / Cancel */
     g_hEdSave = CreateWindowExA(0, "BUTTON", "Save",
                                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                 110, 320, 90, 28, hWnd,
@@ -735,7 +805,7 @@ static void build_edit_controls(HWND hWnd)
                                   (HMENU)(INT_PTR)IDE_CANCEL, g_hInst, NULL);
     SendMessage(g_hEdCancel, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
-    /* ---- Populate ---- */
+    /* Populate */
     if (g_editRow >= 0 && g_editRow < g_nRows) {
         ROW *r = &g_rows[g_editRow];
         SetWindowTextA(g_edName[0], r->szName);
@@ -894,7 +964,6 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         }
 
-        /* Column 1 label click */
         if (code == STN_CLICKED &&
             id >= ID_LBL_BASE && id < ID_LBL_BASE + g_nRows) {
             int i = id - ID_LBL_BASE;
@@ -930,7 +999,13 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
         break;
     }
 
+    case WM_CLOSE:
+        save_window_placement();
+        DestroyWindow(hWnd);
+        return 0;
+
     case WM_DESTROY:
+        save_window_placement();
         KillTimer(hWnd, TIMER_ID);
         PostQuitMessage(0);
         return 0;
@@ -954,7 +1029,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
 
     g_hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
 
-    /* Register main window class */
+    init_toolhelp();
+
     WNDCLASSEXA wc;
     memset(&wc, 0, sizeof(wc));
     wc.cbSize        = sizeof(wc);
@@ -968,7 +1044,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
     wc.lpszClassName = kClassMain;
     RegisterClassExA(&wc);
 
-    /* Register edit window class */
     WNDCLASSEXA we;
     memset(&we, 0, sizeof(we));
     we.cbSize        = sizeof(we);
@@ -986,16 +1061,24 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
     ensure_default_ini();
     load_rows_from_ini();
 
-    int winW = COL_U_DEF * 6 + GAP * 2 + X_PAD * 2;
-    int winH = Y_TOP + g_nRows * (BTN_H_DEF + GAP) + GAP + 60;
+    /* Defaults */
+    int defW = COL_U_DEF * 6 + GAP * 2 + X_PAD * 2;
+    int defH = Y_TOP + g_nRows * (BTN_H_DEF + GAP) + GAP + 60;
+
+    /* Read saved placement */
+    int winX = GetPrivateProfileIntA("Window", "X",         (int)CW_USEDEFAULT, g_iniPath);
+    int winY = GetPrivateProfileIntA("Window", "Y",         (int)CW_USEDEFAULT, g_iniPath);
+    int winW = GetPrivateProfileIntA("Window", "W",         defW,               g_iniPath);
+    int winH = GetPrivateProfileIntA("Window", "H",         defH,               g_iniPath);
+    int bMax = GetPrivateProfileIntA("Window", "Maximized", 0,                  g_iniPath);
 
     HWND hWnd = CreateWindowExA(0, kClassMain, "Process Control",
                                 WS_OVERLAPPEDWINDOW,
-                                CW_USEDEFAULT, CW_USEDEFAULT, winW, winH,
+                                winX, winY, winW, winH,
                                 NULL, NULL, hInst, NULL);
     if (!hWnd) return 0;
 
-    ShowWindow(hWnd, nShow);
+    ShowWindow(hWnd, bMax ? SW_SHOWMAXIMIZED : nShow);
     UpdateWindow(hWnd);
 
     auto_start_rows();
