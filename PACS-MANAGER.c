@@ -21,7 +21,7 @@
  *
  * Build:
  *   MinGW-w64:
- *     gcc -O2 -mwindows -o PACS-MANAGER.exe PACS-MANAGER.c \
+ *     gcc -O2 -s -mwindows -o PACS-MANAGER.exe PACS-MANAGER.c 
  *         -luser32 -lgdi32 -lcomdlg32 -lshell32 -lkernel32
  *
  *   MSVC (Developer Command Prompt):
