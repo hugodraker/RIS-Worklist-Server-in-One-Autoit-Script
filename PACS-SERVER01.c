@@ -7,6 +7,8 @@
  * - System tray with Start/Stop/Settings/Show Console/Exit
  *
  * Compile: tcc -o pacs-server01.exe pacs-server01.c -lws2_32 -lkernel32 -luser32 -lshell32
+ * gcc -O2 -s -mwindows -o pacs-server01.exe PACS-SERVER01.c -lws2_32 -lkernel32 -luser32 -lshell32
+
  */
 
 #define WIN32_LEAN_AND_MEAN
